@@ -63,6 +63,8 @@ class WalletViewModel: ObservableObject {
     @Published var btcAddress: String = ""
     @Published var btcBalance: String = "0"
     @Published var isWdkInitialized: Bool = false
+    /// True once a create, import or delete has failed: the welcome screen then offers a reset.
+    @Published var clientFailed: Bool = false
 
     // Send
     @Published var sendNetwork: Network = .eth
@@ -141,6 +143,7 @@ class WalletViewModel: ObservableObject {
                 isLoading = false
                 statusText = ""
             } catch {
+                clientFailed = true
                 isLoading = false
                 statusText = ""
                 showToast("Error: \(error.localizedDescription)")
@@ -162,6 +165,7 @@ class WalletViewModel: ObservableObject {
                 )
                 isWdkInitialized = true
             } catch {
+                clientFailed = true
                 showToast("WDK init failed: \(error.localizedDescription)")
             }
 
@@ -209,6 +213,7 @@ class WalletViewModel: ObservableObject {
                 )
                 isWdkInitialized = true
             } catch {
+                clientFailed = true
                 showToast("Import failed: \(error.localizedDescription)")
             }
 
@@ -483,30 +488,63 @@ class WalletViewModel: ObservableObject {
 
     func deleteWallet() {
         Task {
+            // The client is kept: one WdkCore per process, reused by the next create or import.
             if let wdk = client {
-                try? await wdk.dispose()
+                isLoading = true
+                statusText = "Deleting wallet..."
+                do {
+                    try await wdk.dispose()
+                } catch {
+                    clientFailed = true
+                }
+                // resetClient() already cleared everything while dispose() was pending.
+                guard client === wdk else { return }
+                isLoading = false
+                statusText = ""
             }
-            client = nil
-            isWdkInitialized = false
-            encryptionKey = ""
-            encryptedSeed = ""
-            ethAddress = ""
-            ethBalance = "0"
-            btcAddress = ""
-            btcBalance = "0"
-            seedPhrase = []
-            importWords = Array(repeating: "", count: 12)
-            importError = false
-            signResult = nil
-            pendingTransactions.removeAll()
-            quotedFeeEth = nil
-            quotedFeeBtc = nil
+            clearWalletState()
             navigate(to: .welcome)
             showToast("Wallet deleted", success: false)
         }
     }
 
+    // MARK: - Reset Client
+
+    /// Recovery for a stuck client: a call that never returns, or a client that throws on every
+    /// call. Nothing is awaited on the old client, because its `dispose()` could hang too. Its
+    /// worklet stays in memory until the app restarts, so the normal flow never calls this.
+    func resetClient() {
+        if let old = client {
+            // Not awaited: wipes the old wallet if the client is only slow.
+            Task { try? await old.dispose() }
+        }
+        client = nil
+        clientFailed = false
+        clearWalletState()
+        isLoading = false
+        statusText = ""
+        navigate(to: .welcome)
+        showToast("WDK client reset")
+    }
+
     // MARK: - Helpers
+
+    private func clearWalletState() {
+        isWdkInitialized = false
+        encryptionKey = ""
+        encryptedSeed = ""
+        ethAddress = ""
+        ethBalance = "0"
+        btcAddress = ""
+        btcBalance = "0"
+        seedPhrase = []
+        importWords = Array(repeating: "", count: 12)
+        importError = false
+        signResult = nil
+        pendingTransactions.removeAll()
+        quotedFeeEth = nil
+        quotedFeeBtc = nil
+    }
 
     func showToast(_ message: String, success: Bool = false) {
         toastMessage = message
@@ -599,7 +637,11 @@ class WalletViewModel: ObservableObject {
 // MARK: - Root View
 
 struct ContentView: View {
+    /// A call still pending after this long is treated as stuck, and the overlay offers a reset.
+    private static let stuckCallDelay: Duration = .seconds(10)
+
     @StateObject private var vm = WalletViewModel()
+    @State private var showReset = false
 
     var body: some View {
         ZStack {
@@ -629,10 +671,20 @@ struct ContentView: View {
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(.white)
                     }
+                    if showReset {
+                        Button("Reset") { vm.resetClient() }
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(.white)
+                    }
                 }
                 .padding(32)
                 .background(.ultraThinMaterial)
                 .cornerRadius(16)
+                .task {
+                    try? await Task.sleep(for: Self.stuckCallDelay)
+                    showReset = !Task.isCancelled
+                }
+                .onDisappear { showReset = false }
             }
 
             // Toast overlay

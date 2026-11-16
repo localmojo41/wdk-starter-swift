@@ -47,6 +47,15 @@ Good to know:
 
 `wdk.config.js` lists the wallet packages that go into the worklet bundle. Its network names are the names the app passes to `WdkCore`, see `wdkConfig` in `WdkStarterApp/ContentView.swift`: `sepolia` (Ethereum Sepolia) and `bitcoin` (Bitcoin testnet). To add or change a network, edit both places and run `xcodegen generate` again.
 
+## Client lifecycle
+
+The app keeps one `WdkCore` client for the whole process, see `WalletViewModel` in `WdkStarterApp/ContentView.swift`.
+
+- **Changing wallet.** "Delete wallet" calls `dispose()` and keeps the client. The next create or import calls `initializeWDK` on that same client.
+- **Resetting a stuck client.** A client is stuck when a call never returns, or when it throws on every call. `resetClient()` then drops it without awaiting anything on it, because its `dispose()` could hang too, and the next action makes a new client. It still sends a `dispose()` to the dropped client, which wipes the old wallet if that client is only slow. "Reset" appears on the loading overlay after 10 seconds, and "Reset WDK client" appears on the welcome screen after a create, import or delete has failed.
+
+Reset is a recovery path, not part of the normal flow. The worklet of the dropped client is never torn down: it stays in memory until the app is restarted, about 35 MB on iOS. Under JavaScriptCore on iOS 26.3.1, a second live worklet has also coincided with crashes.
+
 ## JavaScript engine
 
 The app runs the worklet on BareKit 2.x with the V8 engine, the default and the combination wdk-core-swift is tested with. JavaScriptCore is available but discouraged because of a known intermittent crash on iOS 26; see the [engine notes of wdk-core-swift](https://github.com/tetherto/wdk-core-swift/blob/main/js/README.md#javascriptcore). To use it, change `--engine v8` to `--engine javascriptcore` in the `preGenCommand` of `project.yml` and run `xcodegen generate` again.
