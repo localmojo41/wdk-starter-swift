@@ -78,8 +78,12 @@ class WalletViewModel: ObservableObject {
     @Published var receiveNetwork: Network = .eth
 
     // Sign
-    @Published var signNetwork: Network = .eth
-    @Published var signMessage: String = "Login to MyDApp\nTimestamp: 1711036800\nNonce: a3f8c2"
+    @Published var signNetwork: Network = .eth {
+        didSet { if signNetwork != oldValue { clearSignature() } }
+    }
+    @Published var signMessage: String = "Login to MyDApp\nTimestamp: 1711036800\nNonce: a3f8c2" {
+        didSet { if signMessage != oldValue { clearSignature() } }
+    }
     @Published var signResult: String?
     @Published var verifyResult: Bool?
 
@@ -156,27 +160,12 @@ class WalletViewModel: ObservableObject {
             isLoading = true
             statusText = "Initializing wallet..."
 
-            let wdk = getOrCreateClient()
             do {
-                try await wdk.initializeWDK(
-                    encryptionKey: encryptionKey,
-                    encryptedSeed: encryptedSeed,
-                    config: wdkConfig
-                )
-                isWdkInitialized = true
+                try await openWallet(with: getOrCreateClient())
             } catch {
                 clientFailed = true
                 showToast("WDK init failed: \(error.localizedDescription)")
             }
-
-            if let eth = try? await wdk.getAddress(network: "sepolia") {
-                ethAddress = eth
-            }
-            if let btc = try? await wdk.getAddress(network: "bitcoin") {
-                btcAddress = btc
-            }
-
-            navigate(to: .home)
             isLoading = false
             statusText = ""
             await fetchBalance()
@@ -184,7 +173,31 @@ class WalletViewModel: ObservableObject {
         }
     }
 
+    /// Initializes the wallet from `encryptionKey` and `encryptedSeed` and opens Home. When
+    /// anything fails it throws and leaves the current screen in place, so the user can retry.
+    private func openWallet(with wdk: WdkCore) async throws {
+        try await wdk.initializeWDK(
+            encryptionKey: encryptionKey,
+            encryptedSeed: encryptedSeed,
+            config: wdkConfig
+        )
+        let eth = try await wdk.getAddress(network: "sepolia")
+        let btc = try await wdk.getAddress(network: "bitcoin")
+        ethAddress = eth
+        btcAddress = btc
+        isWdkInitialized = true
+        navigate(to: .home)
+    }
+
     // MARK: - Import Wallet
+
+    /// Fills the import form from pasted text. Anything but exactly 12 words leaves the form
+    /// unchanged and shows the error.
+    func pasteImportWords(_ text: String) {
+        let words = text.split(whereSeparator: \.isWhitespace).map { $0.lowercased() }
+        importError = words.count != 12
+        if !importError { importWords = words }
+    }
 
     func doImport() {
         let words = importWords.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
@@ -200,31 +213,16 @@ class WalletViewModel: ObservableObject {
             isLoading = true
             statusText = "Importing wallet..."
 
-            let wdk = getOrCreateClient()
             do {
+                let wdk = getOrCreateClient()
                 let result = try await wdk.getSeedAndEntropyFromMnemonic(mnemonic: mnemonic)
                 encryptionKey = result.encryptionKey
                 encryptedSeed = result.encryptedSeedBuffer
-
-                try await wdk.initializeWDK(
-                    encryptionKey: encryptionKey,
-                    encryptedSeed: encryptedSeed,
-                    config: wdkConfig
-                )
-                isWdkInitialized = true
+                try await openWallet(with: wdk)
             } catch {
                 clientFailed = true
                 showToast("Import failed: \(error.localizedDescription)")
             }
-
-            if let eth = try? await wdk.getAddress(network: "sepolia") {
-                ethAddress = eth
-            }
-            if let btc = try? await wdk.getAddress(network: "bitcoin") {
-                btcAddress = btc
-            }
-
-            navigate(to: .home)
             isLoading = false
             statusText = ""
             await fetchBalance()
@@ -529,6 +527,12 @@ class WalletViewModel: ObservableObject {
 
     // MARK: - Helpers
 
+    /// A signature and its verification are only valid for the message and network they were made with.
+    private func clearSignature() {
+        signResult = nil
+        verifyResult = nil
+    }
+
     private func clearWalletState() {
         isWdkInitialized = false
         encryptionKey = ""
@@ -616,21 +620,23 @@ class WalletViewModel: ObservableObject {
     }
 
     var formattedEthBalance: String {
-        if let wei = Double(ethBalance) {
-            let eth = wei / 1_000_000_000_000_000_000
-            if eth == 0 { return "0.0000 ETH" }
-            return String(format: "%.4f ETH", eth)
-        }
-        return "\(ethBalance) ETH"
+        formatBalance(ethBalance, decimals: 18, symbol: "ETH")
     }
 
     var formattedBtcBalance: String {
-        if let satoshis = Double(btcBalance) {
-            let btc = satoshis / 100_000_000
-            if btc == 0 { return "0.0000 BTC" }
-            return String(format: "%.4f BTC", btc)
-        }
-        return "\(btcBalance) BTC"
+        formatBalance(btcBalance, decimals: 8, symbol: "BTC")
+    }
+
+    /// Formats a balance given in the smallest unit with four decimals, rounded down so that it
+    /// never shows more than is held.
+    private func formatBalance(_ smallestUnit: String, decimals: Int, symbol: String) -> String {
+        guard let amount = Decimal(string: smallestUnit) else { return "\(smallestUnit) \(symbol)" }
+        let style = Decimal.FormatStyle.number
+            .precision(.fractionLength(4))
+            .rounded(rule: .towardZero)
+            .grouping(.never)
+            .locale(Locale(identifier: "en_US_POSIX"))
+        return "\((amount / pow(10, decimals)).formatted(style)) \(symbol)"
     }
 }
 
