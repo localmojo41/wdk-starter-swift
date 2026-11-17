@@ -192,8 +192,15 @@ class WalletViewModel: ObservableObject {
             encryptedSeed: encryptedSeed,
             config: wdkConfig
         )
-        let eth = try await wdk.getAddress(network: "sepolia")
-        let btc = try await wdk.getAddress(network: "bitcoin")
+        let eth: String, btc: String
+        do {
+            eth = try await wdk.getAddress(network: "sepolia")
+            btc = try await wdk.getAddress(network: "bitcoin")
+        } catch {
+            // Don't leave the seed loaded in the worklet while the app shows no wallet.
+            try? await wdk.dispose()
+            throw error
+        }
         guard isCurrent(session) else { return }
         ethAddress = eth
         btcAddress = btc
