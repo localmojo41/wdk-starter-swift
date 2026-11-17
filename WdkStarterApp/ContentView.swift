@@ -140,6 +140,7 @@ class WalletViewModel: ObservableObject {
                 )
                 seedPhrase = mnemonic.split(separator: " ").map(String.init)
                 navigate(to: .create)
+                clientFailed = false
                 isLoading = false
                 statusText = ""
             } catch {
@@ -164,6 +165,7 @@ class WalletViewModel: ObservableObject {
                     config: wdkConfig
                 )
                 isWdkInitialized = true
+                clientFailed = false
             } catch {
                 clientFailed = true
                 showToast("WDK init failed: \(error.localizedDescription)")
@@ -212,6 +214,7 @@ class WalletViewModel: ObservableObject {
                     config: wdkConfig
                 )
                 isWdkInitialized = true
+                clientFailed = false
             } catch {
                 clientFailed = true
                 showToast("Import failed: \(error.localizedDescription)")
@@ -494,6 +497,7 @@ class WalletViewModel: ObservableObject {
                 statusText = "Deleting wallet..."
                 do {
                     try await wdk.dispose()
+                    if client === wdk { clientFailed = false }
                 } catch {
                     clientFailed = true
                 }
