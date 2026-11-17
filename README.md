@@ -42,6 +42,8 @@ Good to know:
 - `WDK_REFRESH=1 xcodegen generate` rebuilds everything even if nothing changed. It also moves the wdk-core-swift clone to the newest commit of the branch named in `project.yml`; a plain run keeps the commit it already has.
 - `git clean -fdx` is the full reset. It removes every generated file, including the Xcode project and the clone, so the next `xcodegen generate` starts from scratch.
 - A failed run never writes a new or incomplete Xcode project. Fix the reported error and run it again.
+- While `project.yml` names a branch, the `WdkCore` package and the clone are updated separately: Xcode moves the package (File > Packages > Update to Latest Package Versions), and `WDK_REFRESH=1 xcodegen generate` moves the clone. Do both together, so the Swift code and the worklet come from the same wdk-core-swift commit. Otherwise the two can end up on different commits.
+
 
 ## Networks
 
