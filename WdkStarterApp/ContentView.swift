@@ -149,6 +149,7 @@ class WalletViewModel: ObservableObject {
                 encryptedSeed = entropy.encryptedSeedBuffer
                 seedPhrase = mnemonic.split(separator: " ").map(String.init)
                 navigate(to: .create)
+                clientFailed = false
                 isLoading = false
                 statusText = ""
             } catch {
@@ -197,6 +198,7 @@ class WalletViewModel: ObservableObject {
         ethAddress = eth
         btcAddress = btc
         isWdkInitialized = true
+        clientFailed = false
         navigate(to: .home)
     }
 
@@ -539,6 +541,7 @@ class WalletViewModel: ObservableObject {
                 statusText = "Deleting wallet..."
                 do {
                     try await wdk.dispose()
+                    if isCurrent(session) { clientFailed = false }
                 } catch {
                     guard isCurrent(session) else { return }
                     clientFailed = true
