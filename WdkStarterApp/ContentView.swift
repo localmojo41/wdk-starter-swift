@@ -461,6 +461,13 @@ class WalletViewModel: ObservableObject {
                     options: nil
                 )
                 guard isCurrent(session) else { return }
+                // The message or network changed while signing, so this signature is for the old ones.
+                guard signMessage.trimmingCharacters(in: .whitespacesAndNewlines) == message,
+                      (signNetwork == .eth ? "sepolia" : "bitcoin") == network else {
+                    isLoading = false
+                    statusText = ""
+                    return
+                }
                 signResult = "\(result)"
                 navigate(to: .sign)
                 isLoading = false
