@@ -186,13 +186,15 @@ class WalletViewModel: ObservableObject {
     /// anything fails it throws and leaves the current screen in place, so the user can retry.
     private func openWallet(with wdk: WdkCore) async throws {
         let session = self.session
-        try await wdk.initializeWDK(
-            encryptionKey: encryptionKey,
-            encryptedSeed: encryptedSeed,
-            config: wdkConfig
-        )
         let eth: String, btc: String
         do {
+            // The worklet loads the seed before it registers the networks, and does not unload
+            // it when a registration fails, so initialization is covered too.
+            try await wdk.initializeWDK(
+                encryptionKey: encryptionKey,
+                encryptedSeed: encryptedSeed,
+                config: wdkConfig
+            )
             eth = try await wdk.getAddress(network: "sepolia")
             btc = try await wdk.getAddress(network: "bitcoin")
         } catch {
@@ -205,6 +207,11 @@ class WalletViewModel: ObservableObject {
         btcAddress = btc
         isWdkInitialized = true
         clientFailed = false
+        // The wallet is open: the app no longer needs the seed words or the keys.
+        seedPhrase = []
+        importWords = Array(repeating: "", count: 12)
+        encryptionKey = ""
+        encryptedSeed = ""
         navigate(to: .home)
     }
 
@@ -534,8 +541,9 @@ class WalletViewModel: ObservableObject {
                     try await wdk.dispose()
                     if isCurrent(session) { clientFailed = false }
                 } catch {
-                    guard isCurrent(session) else { return }
-                    clientFailed = true
+                    // A client that cannot dispose may still hold the wallet: drop it, as a reset does.
+                    if isCurrent(session) { resetClient() }
+                    return
                 }
                 // resetClient() already cleared everything while dispose() was pending.
                 guard isCurrent(session) else { return }

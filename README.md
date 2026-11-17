@@ -51,8 +51,8 @@ Good to know:
 
 The app keeps one `WdkCore` client for the whole process, see `WalletViewModel` in `WdkStarterApp/ContentView.swift`.
 
-- **Changing wallet.** "Delete wallet" calls `dispose()` and keeps the client. The next create or import calls `initializeWDK` on that same client.
-- **Resetting a stuck client.** A client is stuck when a call never returns, or when it throws on every call. `resetClient()` then drops it without awaiting anything on it, because its `dispose()` could hang too, and the next action makes a new client. It still sends a `dispose()` to the dropped client, which wipes the old wallet if that client is only slow. "Reset" appears on the loading overlay after 10 seconds, and "Reset WDK client" appears on the welcome screen after a create, import or delete has failed.
+- **Changing wallet.** "Delete wallet" calls `dispose()` and keeps the client. The next create or import calls `initializeWDK` on that same client. If that `dispose()` fails, delete falls back to the reset below.
+- **Resetting a stuck client.** A client is stuck when a call never returns, or when it throws on every call. `resetClient()` then drops it without awaiting anything on it, because its `dispose()` could hang too, and the next action makes a new client. It still sends a `dispose()` to the dropped client, which wipes the old wallet if that client is only slow. If the client is truly stuck, that `dispose()` never runs and the old wallet stays loaded until the app is restarted. "Reset" appears on the loading overlay after 10 seconds, and "Reset WDK client" appears on the welcome screen after a create, import or delete has failed.
 
 Reset is a recovery path, not part of the normal flow. The worklet of the dropped client is never torn down: it stays in memory until the app is restarted, about 35 MB on iOS. Under JavaScriptCore on iOS 26.3.1, a second live worklet has also coincided with crashes.
 
