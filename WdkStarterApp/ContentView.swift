@@ -1,5 +1,6 @@
 import SwiftUI
-import WdkSwiftCore
+import UniformTypeIdentifiers
+import WdkCore
 
 // MARK: - Navigation
 
@@ -63,6 +64,8 @@ class WalletViewModel: ObservableObject {
     @Published var btcAddress: String = ""
     @Published var btcBalance: String = "0"
     @Published var isWdkInitialized: Bool = false
+    /// True once a create, import or delete has failed: the welcome screen then offers a reset.
+    @Published var clientFailed: Bool = false
 
     // Send
     @Published var sendNetwork: Network = .eth
@@ -76,13 +79,20 @@ class WalletViewModel: ObservableObject {
     @Published var receiveNetwork: Network = .eth
 
     // Sign
-    @Published var signNetwork: Network = .eth
-    @Published var signMessage: String = "Login to MyDApp\nTimestamp: 1711036800\nNonce: a3f8c2"
+    @Published var signNetwork: Network = .eth {
+        didSet { if signNetwork != oldValue { clearSignature() } }
+    }
+    @Published var signMessage: String = "Login to MyDApp\nTimestamp: 1711036800\nNonce: a3f8c2" {
+        didSet { if signMessage != oldValue { clearSignature() } }
+    }
     @Published var signResult: String?
     @Published var verifyResult: Bool?
 
     // WDK internals
-    private var client: WdkSwiftCore?
+    private var client: WdkCore?
+    /// Identifies the wallet on screen. Delete and reset start a new session, and a result that
+    /// arrives for an older one is dropped, see `isCurrent(_:)`.
+    private var session = 0
     private var encryptionKey: String = ""
     private var encryptedSeed: String = ""
 
@@ -123,24 +133,28 @@ class WalletViewModel: ObservableObject {
     // MARK: - Create Wallet
 
     func createWallet() {
+        let session = self.session
         Task {
             isLoading = true
             statusText = "Generating seed phrase..."
             do {
                 let wdk = getOrCreateClient()
                 let entropy = try await wdk.generateEntropyAndEncrypt(wordCount: 12)
-                encryptionKey = entropy.encryptionKey
-                encryptedSeed = entropy.encryptedSeedBuffer
-
                 let mnemonic = try await wdk.getMnemonicFromEntropy(
                     encryptedEntropy: entropy.encryptedEntropyBuffer,
                     encryptionKey: entropy.encryptionKey
                 )
+                guard isCurrent(session) else { return }
+                encryptionKey = entropy.encryptionKey
+                encryptedSeed = entropy.encryptedSeedBuffer
                 seedPhrase = mnemonic.split(separator: " ").map(String.init)
                 navigate(to: .create)
+                clientFailed = false
                 isLoading = false
                 statusText = ""
             } catch {
+                guard isCurrent(session) else { return }
+                clientFailed = true
                 isLoading = false
                 statusText = ""
                 showToast("Error: \(error.localizedDescription)")
@@ -149,30 +163,19 @@ class WalletViewModel: ObservableObject {
     }
 
     func confirmSeedAndInitialize() {
+        let session = self.session
         Task {
             isLoading = true
             statusText = "Initializing wallet..."
 
-            let wdk = getOrCreateClient()
             do {
-                try await wdk.initializeWDK(
-                    encryptionKey: encryptionKey,
-                    encryptedSeed: encryptedSeed,
-                    config: wdkConfig
-                )
-                isWdkInitialized = true
+                try await openWallet(with: getOrCreateClient())
             } catch {
+                guard isCurrent(session) else { return }
+                clientFailed = true
                 showToast("WDK init failed: \(error.localizedDescription)")
             }
-
-            if let eth = try? await wdk.getAddress(network: "sepolia") {
-                ethAddress = eth
-            }
-            if let btc = try? await wdk.getAddress(network: "bitcoin") {
-                btcAddress = btc
-            }
-
-            navigate(to: .home)
+            guard isCurrent(session) else { return }
             isLoading = false
             statusText = ""
             await fetchBalance()
@@ -180,7 +183,63 @@ class WalletViewModel: ObservableObject {
         }
     }
 
+    /// Initializes the wallet from `encryptionKey` and `encryptedSeed` and opens Home. When
+    /// anything fails it throws and leaves the current screen in place, so the user can retry.
+    private func openWallet(with wdk: WdkCore) async throws {
+        let session = self.session
+        let eth: String, btc: String
+        do {
+            // The worklet loads the seed before it registers the networks, and does not unload
+            // it when a registration fails, so initialization is covered too.
+            try await wdk.initializeWDK(
+                encryptionKey: encryptionKey,
+                encryptedSeed: encryptedSeed,
+                config: wdkConfig
+            )
+            eth = try await wdk.getAddress(network: "sepolia")
+            btc = try await wdk.getAddress(network: "bitcoin")
+        } catch {
+            // Don't leave the seed loaded in the worklet while the app shows no wallet.
+            try? await wdk.dispose()
+            throw error
+        }
+        guard isCurrent(session) else { return }
+        ethAddress = eth
+        btcAddress = btc
+        isWdkInitialized = true
+        clientFailed = false
+        // The wallet is open: the app no longer needs the seed words or the keys.
+        seedPhrase = []
+        importWords = Array(repeating: "", count: 12)
+        encryptionKey = ""
+        encryptedSeed = ""
+        navigate(to: .home)
+    }
+
+    /// How long a copied seed phrase stays on the clipboard.
+    private static let seedClipboardLifetime: TimeInterval = 60
+
+    /// Copies the seed phrase to the clipboard of this device only, and lets it expire.
+    func copySeedPhrase() {
+        UIPasteboard.general.setItems(
+            [[UTType.plainText.identifier: seedPhrase.joined(separator: " ")]],
+            options: [
+                .localOnly: true,
+                .expirationDate: Date().addingTimeInterval(Self.seedClipboardLifetime)
+            ]
+        )
+        showToast("Seed phrase copied")
+    }
+
     // MARK: - Import Wallet
+
+    /// Fills the import form from pasted text. Anything but exactly 12 words leaves the form
+    /// unchanged and shows the error.
+    func pasteImportWords(_ text: String) {
+        let words = text.split(whereSeparator: \.isWhitespace).map { $0.lowercased() }
+        importError = words.count != 12
+        if !importError { importWords = words }
+    }
 
     func doImport() {
         let words = importWords.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
@@ -192,34 +251,24 @@ class WalletViewModel: ObservableObject {
         importError = false
 
         let mnemonic = words.joined(separator: " ")
+        let session = self.session
         Task {
             isLoading = true
             statusText = "Importing wallet..."
 
-            let wdk = getOrCreateClient()
             do {
+                let wdk = getOrCreateClient()
                 let result = try await wdk.getSeedAndEntropyFromMnemonic(mnemonic: mnemonic)
+                guard isCurrent(session) else { return }
                 encryptionKey = result.encryptionKey
                 encryptedSeed = result.encryptedSeedBuffer
-
-                try await wdk.initializeWDK(
-                    encryptionKey: encryptionKey,
-                    encryptedSeed: encryptedSeed,
-                    config: wdkConfig
-                )
-                isWdkInitialized = true
+                try await openWallet(with: wdk)
             } catch {
+                guard isCurrent(session) else { return }
+                clientFailed = true
                 showToast("Import failed: \(error.localizedDescription)")
             }
-
-            if let eth = try? await wdk.getAddress(network: "sepolia") {
-                ethAddress = eth
-            }
-            if let btc = try? await wdk.getAddress(network: "bitcoin") {
-                btcAddress = btc
-            }
-
-            navigate(to: .home)
+            guard isCurrent(session) else { return }
             isLoading = false
             statusText = ""
             await fetchBalance()
@@ -233,17 +282,20 @@ class WalletViewModel: ObservableObject {
 
     func fetchBalance() async {
         guard isWdkInitialized, let wdk = client, !isRefreshingBalance else { return }
+        let session = self.session
         isRefreshingBalance = true
-        defer { isRefreshingBalance = false }
+        defer { if isCurrent(session) { isRefreshingBalance = false } }
 
         do {
             let ethBal = try await wdk.getBalance(network: "sepolia")
+            guard isCurrent(session) else { return }
             ethBalance = ethBal
         } catch {
             print("ETH balance fetch failed: \(error)")
         }
         do {
             let btcBal = try await wdk.getBalance(network: "bitcoin")
+            guard isCurrent(session) else { return }
             btcBalance = btcBal
         } catch {
             print("BTC balance fetch failed: \(error)")
@@ -260,6 +312,7 @@ class WalletViewModel: ObservableObject {
 
     func fetchFeeQuotes() {
         guard isWdkInitialized, let wdk = client else { return }
+        let session = self.session
         let zeroPadAddress = "0x0000000000000000000000000000000000000000"
         let btcAddr = btcAddress.isEmpty ? "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx" : btcAddress
 
@@ -273,6 +326,7 @@ class WalletViewModel: ObservableObject {
                     args: ethArgs,
                     options: nil
                 )
+                guard isCurrent(session) else { return }
                 if let dict = ethResult as? [String: Any], let fee = dict["fee"] {
                     quotedFeeEth = "\(fee)"
                 } else {
@@ -293,6 +347,7 @@ class WalletViewModel: ObservableObject {
                     args: btcArgs,
                     options: nil
                 )
+                guard isCurrent(session) else { return }
                 if let dict = btcResult as? [String: Any], let fee = dict["fee"] {
                     quotedFeeBtc = "\(fee)"
                 } else {
@@ -347,6 +402,7 @@ class WalletViewModel: ObservableObject {
         }
 
         let networkRpc = sendNetwork == .eth ? "sepolia" : "bitcoin"
+        let session = self.session
         let tx = PendingTx(network: sendNetwork, toAddress: address, amount: amount)
         let txId = tx.id
         pendingTransactions.append(tx)
@@ -365,11 +421,14 @@ class WalletViewModel: ObservableObject {
                     args: argsJson,
                     options: nil
                 )
+                // The transaction was sent either way: only its result is dropped with the old wallet.
+                guard isCurrent(session) else { return }
                 let hash = extractTxHash(from: result)
                 updateTx(id: txId, status: .completed(hash: hash))
                 showToast("Transaction confirmed!", success: true)
                 await fetchBalance()
             } catch {
+                guard isCurrent(session) else { return }
                 updateTx(id: txId, status: .failed(error: error.localizedDescription))
                 showToast("Send failed: \(error.localizedDescription)")
             }
@@ -402,6 +461,7 @@ class WalletViewModel: ObservableObject {
         verifyResult = nil
 
         let network = signNetwork == .eth ? "sepolia" : "bitcoin"
+        let session = self.session
         Task {
             isLoading = true
             statusText = "Signing message..."
@@ -413,12 +473,21 @@ class WalletViewModel: ObservableObject {
                     args: try JSONArguments.encode(message),
                     options: nil
                 )
+                guard isCurrent(session) else { return }
+                // The message or network changed while signing, so this signature is for the old ones.
+                guard signMessage.trimmingCharacters(in: .whitespacesAndNewlines) == message,
+                      (signNetwork == .eth ? "sepolia" : "bitcoin") == network else {
+                    isLoading = false
+                    statusText = ""
+                    return
+                }
                 signResult = "\(result)"
                 navigate(to: .sign)
                 isLoading = false
                 statusText = ""
                 showToast("Message signed successfully", success: true)
             } catch {
+                guard isCurrent(session) else { return }
                 isLoading = false
                 statusText = ""
                 showToast("Sign failed: \(error.localizedDescription)")
@@ -438,6 +507,7 @@ class WalletViewModel: ObservableObject {
         }
 
         let network = signNetwork == .eth ? "sepolia" : "bitcoin"
+        let session = self.session
         Task {
             isLoading = true
             statusText = "Verifying signature..."
@@ -450,6 +520,7 @@ class WalletViewModel: ObservableObject {
                     args: argsJson,
                     options: nil
                 )
+                guard isCurrent(session) else { return }
                 if let valid = result as? Bool {
                     verifyResult = valid
                 } else {
@@ -460,6 +531,7 @@ class WalletViewModel: ObservableObject {
                 showToast(verifyResult == true ? "Signature is valid" : "Signature is invalid",
                           success: verifyResult == true)
             } catch {
+                guard isCurrent(session) else { return }
                 verifyResult = false
                 isLoading = false
                 statusText = ""
@@ -471,31 +543,82 @@ class WalletViewModel: ObservableObject {
     // MARK: - Delete Wallet
 
     func deleteWallet() {
+        let session = self.session
         Task {
+            // The client is kept: one WdkCore per process, reused by the next create or import.
             if let wdk = client {
-                try? await wdk.dispose()
+                isLoading = true
+                statusText = "Deleting wallet..."
+                do {
+                    try await wdk.dispose()
+                    if isCurrent(session) { clientFailed = false }
+                } catch {
+                    // A client that cannot dispose may still hold the wallet: drop it, as a reset does.
+                    if isCurrent(session) { resetClient() }
+                    return
+                }
+                // resetClient() already cleared everything while dispose() was pending.
+                guard isCurrent(session) else { return }
+                isLoading = false
+                statusText = ""
             }
-            client = nil
-            isWdkInitialized = false
-            encryptionKey = ""
-            encryptedSeed = ""
-            ethAddress = ""
-            ethBalance = "0"
-            btcAddress = ""
-            btcBalance = "0"
-            seedPhrase = []
-            importWords = Array(repeating: "", count: 12)
-            importError = false
-            signResult = nil
-            pendingTransactions.removeAll()
-            quotedFeeEth = nil
-            quotedFeeBtc = nil
+            clearWalletState()
             navigate(to: .welcome)
             showToast("Wallet deleted", success: false)
         }
     }
 
+    // MARK: - Reset Client
+
+    /// Recovery for a stuck client: a call that never returns, or a client that throws on every
+    /// call. Nothing is awaited on the old client, because its `dispose()` could hang too. Its
+    /// worklet stays in memory until the app restarts, so the normal flow never calls this.
+    func resetClient() {
+        if let old = client {
+            // Not awaited: wipes the old wallet if the client is only slow.
+            Task { try? await old.dispose() }
+        }
+        client = nil
+        clientFailed = false
+        clearWalletState()
+        isLoading = false
+        statusText = ""
+        navigate(to: .welcome)
+        showToast("WDK client reset")
+    }
+
     // MARK: - Helpers
+
+    /// False once a delete or reset has replaced the wallet that was on screen when `session` was
+    /// read. Every async call checks this before it writes its result.
+    private func isCurrent(_ session: Int) -> Bool {
+        session == self.session
+    }
+
+    /// A signature and its verification are only valid for the message and network they were made with.
+    private func clearSignature() {
+        signResult = nil
+        verifyResult = nil
+    }
+
+    private func clearWalletState() {
+        session += 1
+        isRefreshingBalance = false
+        isWdkInitialized = false
+        encryptionKey = ""
+        encryptedSeed = ""
+        ethAddress = ""
+        ethBalance = "0"
+        btcAddress = ""
+        btcBalance = "0"
+        seedPhrase = []
+        importWords = Array(repeating: "", count: 12)
+        importError = false
+        signResult = nil
+        pendingTransactions.removeAll()
+        quotedFeeEth = nil
+        quotedFeeBtc = nil
+    }
 
     func showToast(_ message: String, success: Bool = false) {
         toastMessage = message
@@ -507,9 +630,9 @@ class WalletViewModel: ObservableObject {
         }
     }
 
-    private func getOrCreateClient() -> WdkSwiftCore {
+    private func getOrCreateClient() -> WdkCore {
         if let existing = client { return existing }
-        let wdk = WdkSwiftCore()
+        let wdk = WdkCore()
         client = wdk
         return wdk
     }
@@ -567,28 +690,35 @@ class WalletViewModel: ObservableObject {
     }
 
     var formattedEthBalance: String {
-        if let wei = Double(ethBalance) {
-            let eth = wei / 1_000_000_000_000_000_000
-            if eth == 0 { return "0.0000 ETH" }
-            return String(format: "%.4f ETH", eth)
-        }
-        return "\(ethBalance) ETH"
+        formatBalance(ethBalance, decimals: 18, symbol: "ETH")
     }
 
     var formattedBtcBalance: String {
-        if let satoshis = Double(btcBalance) {
-            let btc = satoshis / 100_000_000
-            if btc == 0 { return "0.0000 BTC" }
-            return String(format: "%.4f BTC", btc)
-        }
-        return "\(btcBalance) BTC"
+        formatBalance(btcBalance, decimals: 8, symbol: "BTC")
+    }
+
+    /// Formats a balance given in the smallest unit with four decimals, rounded down so that it
+    /// never shows more than is held.
+    private func formatBalance(_ smallestUnit: String, decimals: Int, symbol: String) -> String {
+        guard let amount = Decimal(string: smallestUnit) else { return "\(smallestUnit) \(symbol)" }
+        let style = Decimal.FormatStyle.number
+            .precision(.fractionLength(4))
+            .rounded(rule: .towardZero)
+            .grouping(.never)
+            .locale(Locale(identifier: "en_US_POSIX"))
+        return "\((amount / pow(10, decimals)).formatted(style)) \(symbol)"
     }
 }
 
 // MARK: - Root View
 
 struct ContentView: View {
+    /// A call still pending after this long is treated as stuck, and the overlay offers a reset.
+    private static let stuckCallDelay: Duration = .seconds(10)
+
     @StateObject private var vm = WalletViewModel()
+    @State private var showReset = false
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
@@ -618,10 +748,20 @@ struct ContentView: View {
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(.white)
                     }
+                    if showReset {
+                        Button("Reset") { vm.resetClient() }
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(.white)
+                    }
                 }
                 .padding(32)
                 .background(.ultraThinMaterial)
                 .cornerRadius(16)
+                .task {
+                    try? await Task.sleep(for: Self.stuckCallDelay)
+                    showReset = !Task.isCancelled
+                }
+                .onDisappear { showReset = false }
             }
 
             // Toast overlay
@@ -643,6 +783,11 @@ struct ContentView: View {
                 }
                 .padding(.top, 8)
                 .animation(.easeOut(duration: 0.3), value: vm.toastMessage != nil)
+            }
+
+            // Keeps the seed phrase out of the App Switcher snapshot.
+            if scenePhase != .active, vm.currentScreen == .create || vm.currentScreen == .importWallet {
+                Color(.systemBackground).ignoresSafeArea()
             }
         }
     }

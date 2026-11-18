@@ -43,6 +43,14 @@ struct WelcomeScreen: View {
 
             Spacer()
 
+            // Recovery only, see resetClient().
+            if vm.clientFailed {
+                Button("Reset WDK client") { vm.resetClient() }
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .padding(.bottom, 10)
+            }
+
             Text("Powered by Tether WDK")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.secondary)
@@ -87,8 +95,7 @@ struct CreateWalletScreen: View {
 
             VStack(spacing: 10) {
                 Button("Copy to clipboard") {
-                    UIPasteboard.general.string = vm.seedPhrase.joined(separator: " ")
-                    vm.showToast("Seed phrase copied")
+                    vm.copySeedPhrase()
                 }
                 .font(.system(size: 13, weight: .semibold))
                 .padding(.horizontal, 18)
@@ -149,13 +156,7 @@ struct ImportWalletScreen: View {
                 Spacer()
                 Button("Paste") {
                     if let clip = UIPasteboard.general.string {
-                        let words = clip.trimmingCharacters(in: .whitespacesAndNewlines)
-                            .split(separator: " ")
-                            .map(String.init)
-                        for i in 0..<min(words.count, 12) {
-                            vm.importWords[i] = words[i].lowercased()
-                        }
-                        vm.importError = false
+                        vm.pasteImportWords(clip)
                     }
                 }
                 .font(.system(size: 12, weight: .bold))
