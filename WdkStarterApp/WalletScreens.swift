@@ -43,6 +43,14 @@ struct WelcomeScreen: View {
 
             Spacer()
 
+            // Recovery only, see resetClient().
+            if vm.clientFailed {
+                Button("Reset WDK client") { vm.resetClient() }
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .padding(.bottom, 10)
+            }
+
             Text("Powered by Tether WDK")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.secondary)
