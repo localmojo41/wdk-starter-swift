@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import WdkCore
 
 // MARK: - Navigation
@@ -213,6 +214,21 @@ class WalletViewModel: ObservableObject {
         encryptionKey = ""
         encryptedSeed = ""
         navigate(to: .home)
+    }
+
+    /// How long a copied seed phrase stays on the clipboard.
+    private static let seedClipboardLifetime: TimeInterval = 60
+
+    /// Copies the seed phrase to the clipboard of this device only, and lets it expire.
+    func copySeedPhrase() {
+        UIPasteboard.general.setItems(
+            [[UTType.plainText.identifier: seedPhrase.joined(separator: " ")]],
+            options: [
+                .localOnly: true,
+                .expirationDate: Date().addingTimeInterval(Self.seedClipboardLifetime)
+            ]
+        )
+        showToast("Seed phrase copied")
     }
 
     // MARK: - Import Wallet
@@ -713,6 +729,7 @@ struct ContentView: View {
 
     @StateObject private var vm = WalletViewModel()
     @State private var showReset = false
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
@@ -777,6 +794,11 @@ struct ContentView: View {
                 }
                 .padding(.top, 8)
                 .animation(.easeOut(duration: 0.3), value: vm.toastMessage != nil)
+            }
+
+            // Keeps the seed phrase out of the App Switcher snapshot.
+            if scenePhase != .active, vm.currentScreen == .create || vm.currentScreen == .importWallet {
+                Color(.systemBackground).ignoresSafeArea()
             }
         }
     }

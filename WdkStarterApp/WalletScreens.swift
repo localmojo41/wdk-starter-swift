@@ -95,8 +95,7 @@ struct CreateWalletScreen: View {
 
             VStack(spacing: 10) {
                 Button("Copy to clipboard") {
-                    UIPasteboard.general.string = vm.seedPhrase.joined(separator: " ")
-                    vm.showToast("Seed phrase copied")
+                    vm.copySeedPhrase()
                 }
                 .font(.system(size: 13, weight: .semibold))
                 .padding(.horizontal, 18)
