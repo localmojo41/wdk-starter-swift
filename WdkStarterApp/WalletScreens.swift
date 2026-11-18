@@ -157,13 +157,7 @@ struct ImportWalletScreen: View {
                 Spacer()
                 Button("Paste") {
                     if let clip = UIPasteboard.general.string {
-                        let words = clip.trimmingCharacters(in: .whitespacesAndNewlines)
-                            .split(separator: " ")
-                            .map(String.init)
-                        for i in 0..<min(words.count, 12) {
-                            vm.importWords[i] = words[i].lowercased()
-                        }
-                        vm.importError = false
+                        vm.pasteImportWords(clip)
                     }
                 }
                 .font(.system(size: 12, weight: .bold))
