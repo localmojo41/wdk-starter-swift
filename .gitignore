@@ -26,7 +26,6 @@ build/
 *.dSYM
 
 # Swift
-.build/
 *.swiftmodule
 *.swiftdoc
 .swiftpm/
